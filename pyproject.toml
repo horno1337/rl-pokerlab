@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poker-env"
+version = "0.1.0"
+description = "6-player No-Limit Texas Hold'em environment for RL and AI benchmarking"
+requires-python = ">=3.11"
+dependencies = [
+    "gymnasium>=0.29",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+rl = [
+    "stable-baselines3>=2.3",
+    "torch>=2.2",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["poker_env*"]
