@@ -11,13 +11,13 @@ from typing import List
 
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
+RANK_MAP = {r: i for i, r in enumerate(RANKS)}
+SUIT_MAP = {s: i for i, s in enumerate(SUITS)}
 
 
 def card_from_str(s: str) -> int:
     """'Ah' -> integer card id."""
-    rank = RANKS.index(s[0].upper() if s[0] != 't' else 'T')
-    suit = SUITS.index(s[1].lower())
-    return rank * 4 + suit
+    return RANK_MAP[s[0].upper()] * 4 + SUIT_MAP[s[1].lower()]
 
 
 def card_to_str(card: int) -> str:
@@ -34,7 +34,7 @@ class Deck:
         self._dealt: int = 0
 
     def shuffle(self, rng: random.Random | None = None):
-        if rng:
+        if rng is not None:
             rng.shuffle(self._cards)
         else:
             random.shuffle(self._cards)

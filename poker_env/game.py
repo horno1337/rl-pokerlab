@@ -2,7 +2,7 @@
 Core No-Limit Texas Hold'em engine.
 
 Handles: blinds, betting rounds, side pots, showdown, rebuys.
-Pure logic — no ML, no Gymnasium dependency.
+Pure logic
 """
 
 from __future__ import annotations

@@ -122,7 +122,8 @@ class PokerEnv(gym.Env):
         if last_info["hand_done"]:
             reward = self._hand_reward(last_info)
             terminated = self._check_episode_done()
-            obs = self._get_obs() if terminated else self._start_hand_and_advance()[0]
+            obs = self._get_obs() if terminated else self._advance_to_hero(reward)
+            terminated = self._check_episode_done()
             return obs, reward, terminated, False, self._build_info(last_info)
 
         # --- Path B: hand still going, run opponents ---
@@ -134,7 +135,8 @@ class PokerEnv(gym.Env):
             self._pending_reward = None
             terminated = self._check_episode_done()
             if not terminated:
-                obs = self._start_hand_and_advance()[0]
+                obs = self._advance_to_hero(reward)
+                terminated = self._check_episode_done()
 
         return obs, reward, terminated, False, self._build_info(last_info)
 
