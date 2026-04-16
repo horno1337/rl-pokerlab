@@ -98,6 +98,10 @@ class PokerEnv(gym.Env):
             if agent is not None:
                 agent.reset()
         obs, info = self._start_hand_and_advance()
+        # Drain any hands that ended before the hero got a turn
+        while self._pending_reward is not None:
+            self._pending_reward = None
+            obs, info = self._start_hand_and_advance()
         return obs, info
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
@@ -122,7 +126,7 @@ class PokerEnv(gym.Env):
         if last_info["hand_done"]:
             reward = self._hand_reward(last_info)
             terminated = self._check_episode_done()
-            obs = self._get_obs() if terminated else self._advance_to_hero(reward)
+            obs = self._get_obs() if terminated else self._advance_to_hero()
             terminated = self._check_episode_done()
             return obs, reward, terminated, False, self._build_info(last_info)
 
@@ -135,7 +139,7 @@ class PokerEnv(gym.Env):
             self._pending_reward = None
             terminated = self._check_episode_done()
             if not terminated:
-                obs = self._advance_to_hero(reward)
+                obs = self._advance_to_hero()
                 terminated = self._check_episode_done()
 
         return obs, reward, terminated, False, self._build_info(last_info)
@@ -171,6 +175,23 @@ class PokerEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _advance_to_hero(self) -> np.ndarray:
+        """
+        Start new hands until the hero needs to act (or the episode ends).
+
+        Occasionally all opponents fold before the hero gets a turn.
+        _hand_reward() is already called inside _advance_opponents, so
+        _hands_played and _episode_reward are already updated — we just
+        discard _pending_reward and start the next hand.
+        """
+        obs, _ = self._start_hand_and_advance()
+        while self._pending_reward is not None and not self._check_episode_done():
+            self._pending_reward = None
+            obs, _ = self._start_hand_and_advance()
+        if self._pending_reward is not None:
+            self._pending_reward = None
+        return obs
 
     def _start_hand_and_advance(self) -> Tuple[np.ndarray, Dict]:
         """Start a new hand, run opponents until hero must act."""
