@@ -133,17 +133,6 @@ Reward: net chips won/lost per hand, normalised by BB, clipped to `±max_reward_
 
 ## GTO comparison notebook
 
-After training, compare the agent's preflop decisions against GTO:
-
-```bash
-uv run jupyter notebook notebooks/btn_rfi_analysis.ipynb
-```
-
-Produces three heatmaps across the 13×13 hand matrix:
-
-- **PPO raise frequency** — how often the agent raises each hand combo from the button
-- **GTO range** — solver-derived BTN RFI range for 6-max 100BB
-- **Deviation** — PPO minus GTO, highlighting over- and under-raises
 
 ---
 
@@ -157,11 +146,3 @@ Produces three heatmaps across the 13×13 hand matrix:
 - Stacks persist across hands within a session
 
 ---
-
-## Roadmap
-
-- [ ] Self-play training loop
-- [ ] League training (opponent pool of past checkpoints)
-- [ ] Expanded GTO analysis — CO open, BB defend, 3-bet ranges
-- [ ] Hand history logger
-- [ ] Web UI for watching games
