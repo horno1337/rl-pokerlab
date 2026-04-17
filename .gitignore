@@ -1,8 +1,14 @@
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
 *.egg-info/
 .venv/
+venv/
+*.egg-info
 
 # Trained models — large binaries, reproducible by running train_ppo.py
 # Keep only the final league model so others can run eval without training
@@ -14,7 +20,17 @@ logs/
 
 # Jupyter
 notebooks/.ipynb_checkpoints/
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
+.claude
 mnt/
