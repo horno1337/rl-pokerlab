@@ -7,7 +7,6 @@ __pycache__/
 # Trained models — large binaries, reproducible by running train_ppo.py
 # Keep only the final league model so others can run eval without training
 models/
-!models/ppo_league_final.zip
 checkpoints/
 
 # Training logs
