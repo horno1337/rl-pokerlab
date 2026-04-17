@@ -17,8 +17,54 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from poker_env.game import PokerGame, Action, GameState
+from poker_env.game import PokerGame, Action, GameState, ActionType, Street
 from poker_env.agents.base import BaseAgent, build_observation, decode_action, OBS_DIM, N_ACTIONS
+
+# ---------------------------------------------------------------------------
+# GTO BTN RFI raise frequencies (6-max 100BB, condensed to rank pairs).
+# Key: (high_rank, low_rank, suited) → raise frequency 0.0–1.0
+# Rank encoding: 0=2, 12=A (matches card // 4)
+# Hands NOT in this dict have GTO raise freq = 0.0 (pure fold).
+# ---------------------------------------------------------------------------
+def _build_gto_btn_rfi() -> dict:
+    m: dict = {}
+    # Pocket pairs
+    for r, f in [(12,1.),(11,1.),(10,1.),(9,1.),(8,1.),(7,1.),(6,1.),(5,1.),
+                 (4,1.),(3,.9),(2,.8),(1,.6),(0,.5)]:
+        m[(r, r, False)] = f
+    # Suited Ax
+    for r, f in [(11,1.),(10,1.),(9,1.),(8,1.),(7,1.),(6,1.),(5,1.),(4,1.),
+                 (3,1.),(2,1.),(1,1.),(0,.8)]:
+        m[(12, r, True)] = f
+    # Suited Kx
+    for r, f in [(10,1.),(9,1.),(8,1.),(7,1.),(6,.9),(5,.6),(4,.6),(3,.5),
+                 (2,.5),(1,.4),(0,.4)]:
+        m[(11, r, True)] = f
+    # Suited Qx
+    for r, f in [(9,1.),(8,1.),(7,1.),(6,.7),(5,.5),(2,.4),(1,.4),(0,.4)]:
+        m[(10, r, True)] = f
+    # Suited Jx
+    for r, f in [(8,1.),(7,1.),(6,.8),(5,.5),(1,.4),(0,.4)]:
+        m[(9, r, True)] = f
+    # Suited connectors / others
+    for (h,l), f in [((8,7),1.),((7,6),1.),((6,5),1.),((5,4),1.),
+                     ((8,6),1.),((7,5),.9),((6,4),.8),((5,3),.7),
+                     ((7,4),.5),((6,3),.5),((8,5),.6)]:
+        m[(h, l, True)] = f
+    # Offsuit Ax
+    for r, f in [(11,1.),(10,1.),(9,1.),(8,1.),(7,.8),(6,.5),(5,.4)]:
+        m[(12, r, False)] = f
+    # Offsuit Kx
+    for r, f in [(10,1.),(9,1.),(8,1.),(7,.7)]:
+        m[(11, r, False)] = f
+    # Offsuit Qx/Jx/Tx
+    for r, f in [(9,1.),(8,.8),(7,.5)]: m[(10, r, False)] = f
+    for r, f in [(8,.8),(7,.5)]:        m[(9,  r, False)] = f
+    for r, f in [((8,7),.7),((7,6),.5),((6,5),.4)]:
+        m[(r[0], r[1], False)] = f
+    return m
+
+_GTO_BTN_RFI = _build_gto_btn_rfi()
 
 
 class PokerEnv(gym.Env):
@@ -45,6 +91,8 @@ class PokerEnv(gym.Env):
         bb: int = 10,
         hands_per_episode: int = 200,
         max_reward_bb: float = 500.0,
+        gto_exploit_bonus: float = 0.5,
+        max_ev_scale: float = 1.0,
         seed: Optional[int] = None,
         render_mode: Optional[str] = None,
     ):
@@ -57,6 +105,8 @@ class PokerEnv(gym.Env):
         self.bb = bb
         self.hands_per_episode = hands_per_episode
         self.max_reward_bb = max_reward_bb
+        self.gto_exploit_bonus = gto_exploit_bonus
+        self.max_ev_scale = max_ev_scale
         self.render_mode = render_mode
 
         self.game = PokerGame(
@@ -83,6 +133,8 @@ class PokerEnv(gym.Env):
         self._hands_played: int = 0
         self._episode_reward: float = 0.0
         self._pending_reward: Optional[float] = None
+        self._gto_deviation_this_hand: bool = False   # hero raised a hand GTO says fold
+        self._gto_compliant_raise_this_hand: bool = False  # hero raised a hand GTO says raise
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -116,6 +168,9 @@ class PokerEnv(gym.Env):
         """
         assert not self.game.hand_done, "Call reset() before step()"
 
+        # Check for GTO deviation before applying the action
+        self._check_gto_deviation(action, self.game.state)
+
         hero_action = decode_action(action, self.game.state)
         last_info = self.game.step(hero_action)
 
@@ -144,6 +199,45 @@ class PokerEnv(gym.Env):
 
         return obs, reward, terminated, False, self._build_info(last_info)
 
+    def _check_gto_deviation(self, action: int, state: GameState) -> None:
+        """
+        Flag this hand if the hero makes a profitable-deviation candidate:
+        raises/all-ins from the button preflop when GTO says to fold (freq=0).
+
+        Only fires once per hand (the BTN open decision).
+        """
+        if self._gto_deviation_this_hand:
+            return  # already flagged
+        if state.street != Street.PREFLOP:
+            return
+        if state.acting_seat != self.hero_seat:
+            return
+        if state.acting_seat != state.button_seat:
+            return
+        if state.current_bet != state.bb_amount:
+            return  # not a clean RFI spot (someone already raised)
+
+        # Only care about raises (action 2/3/4); fold/call = not a deviation
+        if action not in (2, 3, 4):
+            return
+
+        hero = state.players[self.hero_seat]
+        cards = hero.hole_cards
+        r1, r2 = cards[0] // 4, cards[1] // 4
+        s1, s2 = cards[0] % 4,  cards[1] % 4
+        if r1 < r2:
+            r1, r2 = r2, r1
+            s1, s2 = s2, s1
+        suited = (s1 == s2) and (r1 != r2)
+
+        gto_freq = _GTO_BTN_RFI.get((r1, r2, suited), 0.0)
+        if gto_freq == 0.0:
+            self._gto_deviation_this_hand = True
+        elif gto_freq >= 0.8:
+            # Only flag as compliant for hands GTO raises frequently (≥80%),
+            # so mixed-strategy hands don't dilute the signal.
+            self._gto_compliant_raise_this_hand = True
+
     def _hand_reward(self, info: Dict) -> float:
         """
         Extract hero's per-hand reward, normalised by BB.
@@ -152,9 +246,37 @@ class PokerEnv(gym.Env):
         function stable. Default cap is 500BB — covers any realistic pot
         at 100BB starting stacks with rebuys, but prevents runaway gradient
         variance from giant deep-stack pots.
+
+        If the hero deviated from GTO (raised a hand GTO says fold) and WON,
+        a bonus multiplier is applied to reward successful exploitation.
+        Losses on deviations are NOT penalised extra — the chip loss is enough.
         """
         rewards = info["rewards"]
         reward = rewards[self.hero_seat] / self.bb
+
+        if reward > 0:
+            # Max-EV pot-size bonus: winning a larger pot gives a superlinear reward.
+            # Encourages building big pots with strong hands (AA, sets, etc.).
+            # Scale = pot / 100BB so a 100BB pot → 2x, a 200BB pot → 3x, etc.
+            # max_ev_scale=0 disables this (default off until mixed league converges).
+            if self.max_ev_scale > 0:
+                pot_bb = info.get("pot", self.bb * 2) / self.bb
+                pot_multiplier = 1.0 + (pot_bb / 100.0) * self.max_ev_scale
+                reward *= pot_multiplier
+
+            # GTO-deviation bonus: extra reward for successfully exploiting
+            # a spot GTO says fold (e.g. opening 87o BTN and winning).
+            if self._gto_deviation_this_hand and self.gto_exploit_bonus > 0:
+                reward *= (1.0 + self.gto_exploit_bonus)
+
+        elif reward < 0 and self._gto_compliant_raise_this_hand:
+            # GTO-compliant loss cushion: when the hero raised a hand GTO says
+            # raise (≥80% freq) but lost due to variance, reduce the penalty.
+            # Prevents PPO from learning "don't raise AKs because I lost once" —
+            # the process was correct, the outcome was unlucky.
+            # Cushion = 20% reduction in loss magnitude (reward × 0.8).
+            reward *= 0.8
+
         reward = float(np.clip(reward, -self.max_reward_bb, self.max_reward_bb))
         self._episode_reward += reward
         self._hands_played += 1
@@ -196,6 +318,8 @@ class PokerEnv(gym.Env):
     def _start_hand_and_advance(self) -> Tuple[np.ndarray, Dict]:
         """Start a new hand, run opponents until hero must act."""
         self.game.start_hand()
+        self._gto_deviation_this_hand = False
+        self._gto_compliant_raise_this_hand = False
         obs = self._advance_opponents()
         return obs, {"hand_number": self.game.hand_number}
 

@@ -20,6 +20,11 @@ Three training modes, each addressing a known weakness:
                           are never evicted, preventing the agent from forgetting
                           how to beat weaker play and avoiding strategy cycling.
 
+  mixed_league          — like league, but each env mixes 3 SelfPlay opponents
+                          with 2 ThreeBetAgents every generation. Prevents the
+                          pure self-play collapse where the agent folds everything
+                          from BTN to avoid 3-bets (observed after league training).
+
 # ---------------------------------------------------------------------------
 # Recommended training sequence
 # ---------------------------------------------------------------------------
@@ -111,7 +116,24 @@ def make_selfplay_env(pool: ModelPool, seed: int | None = None) -> PokerEnv:
     return _make_poker_env(opponents, seed)
 
 
-def _make_poker_env(opponents, seed):
+def make_mixed_league_env(pool: ModelPool, seed: int | None = None) -> PokerEnv:
+    """
+    Hero vs 3 SelfPlayAgents + 2 ThreeBetAgents.
+    Mixing frozen self-play copies with ThreeBetAgents ensures the agent
+    keeps learning to handle 3-betting pressure every generation, closing
+    the exploit that pure self-play leaves open.
+    """
+    opponents = [
+        SelfPlayAgent(seat=1, pool=pool),
+        SelfPlayAgent(seat=2, pool=pool),
+        SelfPlayAgent(seat=3, pool=pool),
+        ThreeBetAgent(seat=4, bluff_freq=0.4, seed=None if seed is None else seed + 4),
+        ThreeBetAgent(seat=5, bluff_freq=0.6, seed=None if seed is None else seed + 5),
+    ]
+    return _make_poker_env(opponents, seed)
+
+
+def _make_poker_env(opponents, seed, gto_exploit_bonus: float = 0.5):
     return PokerEnv(
         opponents=opponents,
         hero_seat=0,
@@ -120,6 +142,7 @@ def _make_poker_env(opponents, seed):
         sb=5,
         bb=10,
         hands_per_episode=200,
+        gto_exploit_bonus=gto_exploit_bonus,
         seed=seed,
     )
 
@@ -308,6 +331,67 @@ def train_league(
     return model
 
 
+def train_mixed_league(
+    n_generations: int = 5,
+    steps_per_gen: int = 300_000,
+    n_envs: int = 4,
+    base_model: str | None = None,
+) -> PPO:
+    """
+    Mixed-opponent league: 3 SelfPlay + 2 ThreeBet per env each generation.
+
+    Fixes the pure self-play collapse where agents converge to folding everything
+    from BTN to avoid 3-bets. ThreeBet opponents stay in the mix every generation,
+    so the agent must learn a balanced BTN range — open strong hands (which can
+    withstand a 3-bet), fold trash — instead of the two failure modes:
+      - Pure heuristic training: opens 85% (no punishment for weak opens)
+      - Pure self-play: opens 0% (overcorrects, folds everything)
+
+    Pool composition per generation:
+      Gen 1:  [base_model] + 2x ThreeBet
+      Gen 2:  [base, gen_1] + 2x ThreeBet
+      ...
+    """
+    os.makedirs("models/mixed_league", exist_ok=True)
+
+    pool = ModelPool(max_size=n_generations + 1)
+
+    if base_model and os.path.exists(base_model + ".zip"):
+        pool.add(base_model + ".zip")
+        print(f"[mixed_league] Pool seeded with {base_model}")
+    else:
+        print("[mixed_league] No base model — Gen 1 self-play opponents start random")
+
+    current_path: str | None = base_model
+    model: PPO | None = None
+
+    for gen in range(1, n_generations + 1):
+        gen_path = f"models/mixed_league/gen_{gen}"
+        print(f"\n{'='*55}")
+        print(f"[mixed_league] Generation {gen}/{n_generations}  |  pool size: {len(pool)}")
+        print(f"Pool contents: {pool._paths}")
+        print("="*55)
+
+        env = make_vec_env(lambda: make_mixed_league_env(pool), n_envs=n_envs)
+        model = _build_model(env, current_path)
+
+        eval_env = make_mixed_league_env(pool, seed=42)
+        callbacks = _make_callbacks(n_envs, gen_path, eval_env)
+
+        model.learn(total_timesteps=steps_per_gen, callback=callbacks)
+        model.save(gen_path)
+        print(f"Gen {gen} saved → {gen_path}.zip")
+
+        pool.add(gen_path + ".zip")
+        current_path = gen_path
+
+    if model is not None:
+        model.save("models/ppo_mixed_league_final")
+        print("\nSaved final: models/ppo_mixed_league_final.zip")
+
+    return model
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -342,7 +426,7 @@ def evaluate(model_path: str, n_hands: int = 2000):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode",        choices=["heuristic", "threebet", "selfplay", "league"],
+    parser.add_argument("--mode",        choices=["heuristic", "threebet", "selfplay", "league", "mixed_league"],
                         default="heuristic")
     parser.add_argument("--timesteps",   type=int, default=500_000,
                         help="Total steps (heuristic/threebet/selfplay) or steps-per-gen (league)")
@@ -357,10 +441,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     output_models = {
-        "heuristic": "models/ppo_poker_final",
-        "threebet":  "models/ppo_threebet_final",
-        "selfplay":  "models/ppo_selfplay_final",
-        "league":    "models/ppo_league_final",
+        "heuristic":    "models/ppo_poker_final",
+        "threebet":     "models/ppo_threebet_final",
+        "selfplay":     "models/ppo_selfplay_final",
+        "league":       "models/ppo_league_final",
+        "mixed_league": "models/ppo_mixed_league_final",
     }
     eval_model = args.model or output_models[args.mode]
 
@@ -373,6 +458,8 @@ if __name__ == "__main__":
             train_selfplay(args.timesteps, args.n_envs, args.base_model)
         elif args.mode == "league":
             train_league(args.generations, args.timesteps, args.n_envs, args.base_model)
+        elif args.mode == "mixed_league":
+            train_mixed_league(args.generations, args.timesteps, args.n_envs, args.base_model)
 
     if os.path.exists(eval_model + ".zip") or os.path.exists(eval_model):
         evaluate(model_path=eval_model)
