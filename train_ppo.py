@@ -133,7 +133,8 @@ def make_mixed_league_env(pool: ModelPool, seed: int | None = None) -> PokerEnv:
     return _make_poker_env(opponents, seed)
 
 
-def _make_poker_env(opponents, seed, gto_exploit_bonus: float = 0.5):
+def _make_poker_env(opponents, seed, gto_exploit_bonus: float = 0.5,
+                    max_ev_scale: float = 1.0, kl_coef: float = 0.3):
     return PokerEnv(
         opponents=opponents,
         hero_seat=0,
@@ -143,6 +144,8 @@ def _make_poker_env(opponents, seed, gto_exploit_bonus: float = 0.5):
         bb=10,
         hands_per_episode=200,
         gto_exploit_bonus=gto_exploit_bonus,
+        max_ev_scale=max_ev_scale,
+        kl_coef=kl_coef,
         seed=seed,
     )
 

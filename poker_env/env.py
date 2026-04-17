@@ -93,6 +93,7 @@ class PokerEnv(gym.Env):
         max_reward_bb: float = 500.0,
         gto_exploit_bonus: float = 0.5,
         max_ev_scale: float = 1.0,
+        kl_coef: float = 0.3,
         seed: Optional[int] = None,
         render_mode: Optional[str] = None,
     ):
@@ -107,6 +108,7 @@ class PokerEnv(gym.Env):
         self.max_reward_bb = max_reward_bb
         self.gto_exploit_bonus = gto_exploit_bonus
         self.max_ev_scale = max_ev_scale
+        self.kl_coef = kl_coef
         self.render_mode = render_mode
 
         self.game = PokerGame(
@@ -168,13 +170,17 @@ class PokerEnv(gym.Env):
         """
         assert not self.game.hand_done, "Call reset() before step()"
 
+        # Immediate KL-alignment reward at BTN RFI decision points.
+        # Fires before the action so it uses the pre-action game state.
+        kl_reward = self._compute_kl_reward(action, self.game.state)
+
         # Check for GTO deviation before applying the action
         self._check_gto_deviation(action, self.game.state)
 
         hero_action = decode_action(action, self.game.state)
         last_info = self.game.step(hero_action)
 
-        reward = 0.0
+        reward = kl_reward
         terminated = False
 
         # --- Path A: hero's action ended the hand ---
@@ -198,6 +204,47 @@ class PokerEnv(gym.Env):
                 terminated = self._check_episode_done()
 
         return obs, reward, terminated, False, self._build_info(last_info)
+
+    def _compute_kl_reward(self, action: int, state: GameState) -> float:
+        """
+        Immediate per-step reward that nudges the policy toward GTO at BTN RFI spots.
+
+        Behavioral KL approximation (no access to action probabilities needed):
+          alignment = gto_freq       if hero raises  (high gto_freq = good raise)
+          alignment = 1 - gto_freq   if hero folds   (high gto_freq = bad fold)
+          kl_reward = kl_coef × (alignment - 0.5) × 2   → range [-kl_coef, +kl_coef]
+
+        Examples with kl_coef=0.3:
+          Raise AA  (gto=1.0)  → +0.30 BB  (aligned)
+          Fold  AA  (gto=1.0)  → -0.30 BB  (misaligned)
+          Raise 72o (gto=0.0)  → -0.30 BB  (deviation — penalised but GTO-win bonus can offset)
+          Fold  72o (gto=0.0)  → +0.30 BB  (aligned)
+          Raise 87s (gto=0.5)  →  0.00 BB  (mixed — neutral)
+        """
+        if self.kl_coef == 0:
+            return 0.0
+        if state.street != Street.PREFLOP:
+            return 0.0
+        if state.acting_seat != self.hero_seat:
+            return 0.0
+        if state.acting_seat != state.button_seat:
+            return 0.0
+        if state.current_bet != state.bb_amount:
+            return 0.0
+
+        hero = state.players[self.hero_seat]
+        cards = hero.hole_cards
+        r1, r2 = cards[0] // 4, cards[1] // 4
+        s1, s2 = cards[0] % 4,  cards[1] % 4
+        if r1 < r2:
+            r1, r2 = r2, r1
+            s1, s2 = s2, s1
+        suited = (s1 == s2) and (r1 != r2)
+
+        gto_freq = _GTO_BTN_RFI.get((r1, r2, suited), 0.0)
+        raised = action in (2, 3, 4)
+        alignment = gto_freq if raised else (1.0 - gto_freq)
+        return self.kl_coef * (alignment - 0.5) * 2.0
 
     def _check_gto_deviation(self, action: int, state: GameState) -> None:
         """
