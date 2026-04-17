@@ -4,6 +4,7 @@ Baseline agents for benchmarking.
   RandomAgent     — uniform random over legal actions
   CallAgent       — always call/check, never fold or raise
   HeuristicAgent  — simple rule-based play using hand strength
+  ThreeBetAgent   — 3-bets aggressively vs BTN opens; exposes over-raising
   HumanAgent      — reads action from stdin (for manual play)
 """
 
@@ -11,7 +12,7 @@ from __future__ import annotations
 import random
 from typing import Dict, Any
 
-from poker_env.game import GameState, Action, ActionType
+from poker_env.game import GameState, Action, ActionType, Street
 from poker_env.agents.base import BaseAgent, decode_action
 from poker_env.hand_eval import best_hand, hand_name
 
@@ -104,6 +105,119 @@ class HeuristicAgent(BaseAgent):
             strength = ranks[0] / 2  # 0-6
             if ranks[0] == ranks[1]:
                 strength += 3  # pocket pair bonus
+            return int(strength)
+        score, _ = best_hand(hole + community)
+        return score
+
+
+class ThreeBetAgent(BaseAgent):
+    """
+    Exploits over-raising from the button by 3-betting aggressively.
+
+    Vs a BTN open (preflop raise from button_seat):
+      - Value 3-bet  (top ~15%): TT+, AK, AQs, AJs, KQs  → re-raise to 3x
+      - Bluff 3-bet  (suited connectors): 65s-T9s with some frequency  → re-raise
+      - Call          (medium hands)                        → call
+      - Fold          (trash)                               → fold
+
+    In all other spots plays like HeuristicAgent, so it's a valid full-street agent.
+
+    The goal is to make the PPO agent pay for an 85% BTN open range:
+    facing a 3-bet with 72o is immediately punishing.
+    """
+
+    def __init__(self, seat: int, bluff_freq: float = 0.5, seed: int | None = None):
+        super().__init__(seat)
+        self.bluff_freq = bluff_freq   # how often suited connectors 3-bet as bluffs
+        self.rng = random.Random(seed)
+
+    def act(self, state: GameState) -> Action:
+        hero = state.players[self.seat]
+        call_amount = state.current_bet - hero.bet_street
+        all_in_to = hero.bet_street + hero.stack
+
+        if self._is_btn_open(state):
+            return self._vs_btn_open(state, hero, call_amount, all_in_to)
+
+        return self._heuristic(state, hero, call_amount, all_in_to)
+
+    def _is_btn_open(self, state: GameState) -> bool:
+        """True if the last aggressor was the button and it's still preflop."""
+        return (
+            state.street == Street.PREFLOP
+            and state.current_bet > state.bb_amount
+            and state.last_aggressor == state.button_seat
+            and self.seat != state.button_seat
+        )
+
+    def _vs_btn_open(self, state, hero, call_amount, all_in_to):
+        val = self._preflop_value(hero.hole_cards)
+        three_bet_to = min(state.current_bet * 3, all_in_to)
+
+        if val >= 9.0:
+            # Value 3-bet: TT+, AK, AQs and equivalents
+            return Action(ActionType.RAISE, amount=three_bet_to)
+
+        if val >= 6.5 and self.rng.random() < self.bluff_freq:
+            # Bluff 3-bet: suited connectors, small pairs — polarised range
+            return Action(ActionType.RAISE, amount=three_bet_to)
+
+        if val >= 5.0:
+            # Call with medium equity (call_amount check guards against shove)
+            if call_amount < hero.stack:
+                return Action(ActionType.CALL)
+
+        return Action(ActionType.FOLD)
+
+    def _preflop_value(self, hole_cards: list) -> float:
+        """
+        Score a preflop hand:
+          Pairs     → pair_rank (22=0, AA=12)
+          Suited    → avg_rank + 1.5
+          Offsuit   → avg_rank
+          Connector → +0.5
+        """
+        ranks = sorted([c // 4 for c in hole_cards], reverse=True)
+        high, low = ranks
+        suited = (hole_cards[0] % 4 == hole_cards[1] % 4)
+
+        if high == low:
+            return float(high)   # pairs: 0 (22) → 12 (AA)
+
+        base = (high + low) / 2.0
+        if suited:
+            base += 1.5
+        if high - low == 1:      # connector
+            base += 0.5
+        return base
+
+    def _heuristic(self, state, hero, call_amount, all_in_to):
+        pot_raise_to = state.current_bet + state.pot
+        strength = self._hand_strength(hero.hole_cards, state.community_cards)
+
+        if strength >= 5:
+            if self.rng.random() < 0.5 and all_in_to > state.current_bet:
+                return Action(ActionType.RAISE, amount=min(pot_raise_to, all_in_to))
+            if call_amount >= hero.stack:
+                return Action(ActionType.ALL_IN, amount=all_in_to)
+            return Action(ActionType.CALL) if call_amount > 0 else Action(ActionType.CHECK)
+        elif strength >= 2:
+            if call_amount == 0:
+                return Action(ActionType.CHECK)
+            if call_amount <= state.pot * 0.3:
+                return Action(ActionType.CALL)
+            return Action(ActionType.FOLD)
+        else:
+            if call_amount == 0:
+                return Action(ActionType.CHECK)
+            return Action(ActionType.FOLD)
+
+    def _hand_strength(self, hole: list, community: list) -> int:
+        if not community:
+            ranks = sorted([c // 4 for c in hole], reverse=True)
+            strength = ranks[0] / 2
+            if ranks[0] == ranks[1]:
+                strength += 3
             return int(strength)
         score, _ = best_hand(hole + community)
         return score
