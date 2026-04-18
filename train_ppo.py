@@ -83,10 +83,22 @@ from poker_env.agents.selfplay import ModelPool, SelfPlayAgent
 # ---------------------------------------------------------------------------
 
 def make_env(seed: int | None = None) -> PokerEnv:
-    """Hero vs 2 Random + 3 Heuristic."""
+    """
+    Hero vs 2 CallAgent + 3 HeuristicAgent.
+
+    CallAgents always call and never fold, which eliminates the BTN all-in
+    fold-equity exploit: the model cannot steal with any two cards.  Hand
+    strength becomes the only thing that determines profit.
+
+      AA vs 2 callers: win ~73% → strong +EV raise
+      72o vs 2 callers: win ~22% → clear -EV raise → model learns to fold
+
+    HeuristicAgents still provide fold equity for min-raises with good hands,
+    creating a realistic mixed signal.
+    """
     opponents = [
-        RandomAgent(seat=1, seed=None if seed is None else seed + 1),
-        RandomAgent(seat=2, seed=None if seed is None else seed + 2),
+        CallAgent(seat=1),
+        CallAgent(seat=2),
         HeuristicAgent(seat=3, aggression=0.4, seed=None if seed is None else seed + 3),
         HeuristicAgent(seat=4, aggression=0.6, seed=None if seed is None else seed + 4),
         HeuristicAgent(seat=5, aggression=0.8, seed=None if seed is None else seed + 5),
@@ -134,7 +146,7 @@ def make_mixed_league_env(pool: ModelPool, seed: int | None = None) -> PokerEnv:
 
 
 def _make_poker_env(opponents, seed, gto_exploit_bonus: float = 0.5,
-                    max_ev_scale: float = 1.0, kl_coef: float = 0.3):
+                    max_ev_scale: float = 1.0, kl_coef: float = 5.0):
     return PokerEnv(
         opponents=opponents,
         hero_seat=0,

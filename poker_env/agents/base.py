@@ -26,24 +26,37 @@ def build_observation(state: GameState, hero_seat: int) -> np.ndarray:
     Build a flat numpy observation vector for the agent at hero_seat.
 
     Layout:
-      [0]       street (0-3, normalized)
-      [1]       pot (normalized by BB*100)
-      [2]       current_bet (normalized)
-      [3]       hero stack (normalized)
-      [4]       hero bet_street (normalized)
-      [5]       position relative to button (0=button, normalized)
-      [6:58]    hero hole cards (one-hot, 52 dims)
-      [58:110]  community cards (one-hot, 52 dims)
-      [110:116] opponent stacks (normalized, 0 if folded/self)
-      [116:122] opponent bet_street (normalized)
-      [122:128] opponent is_folded flags
-      [128:134] opponent is_all_in flags
-    Total: 134 dims
+      [0]     street (0-3, normalized)
+      [1]     pot (normalized by BB*100)
+      [2]     current_bet (normalized)
+      [3]     hero stack (normalized)
+      [4]     hero bet_street (normalized)
+      [5]     position relative to button (0=button, normalized)
+      [6]     hole card high rank (rank/12, 0=2, 1=A)
+      [7]     hole card low rank  (rank/12)
+      [8]     suited (1.0 if same suit and not a pair)
+      [9]     pocket pair (1.0 if same rank)
+      [10:62] community cards (one-hot, 52 dims)
+      [62:68] opponent stacks (normalized)
+      [68:74] opponent bet_street (normalized)
+      [74:80] opponent is_folded flags
+      [80:86] opponent is_all_in flags
+    Total: 86 dims
+
+    Hole cards are represented ONLY as compact features [6:9].
+    Previous versions included a 52-dim one-hot for hole cards, but a shallow
+    MLP converged to ignoring it — the model found "raise 65% from BTN" was
+    profitable without needing to read individual cards.  Removing the one-hot
+    forces the network to use high_rank/low_rank/suited/pocket_pair directly.
+
+    Community cards keep the one-hot [10:62] because postflop hand strength
+    (pairs, flushes, straights) genuinely requires knowing which exact cards
+    are on the board.
     """
     NORM = state.bb_amount * 100  # normalize by 100BB
     hero = state.players[hero_seat]
 
-    obs = np.zeros(134, dtype=np.float32)
+    obs = np.zeros(86, dtype=np.float32)
 
     obs[0] = state.street / 3.0
     obs[1] = state.pot / NORM
@@ -56,23 +69,31 @@ def build_observation(state: GameState, hero_seat: int) -> np.ndarray:
     pos = (hero_seat - state.button_seat) % n
     obs[5] = pos / (n - 1) if n > 1 else 0.0
 
-    # Hole cards (one-hot)
-    for card in hero.hole_cards:
-        obs[6 + card] = 1.0
+    # Compact hole card features — the only hole card information in the obs.
+    # These 4 numbers are everything the model knows about its own hand.
+    if len(hero.hole_cards) == 2:
+        r0, r1 = hero.hole_cards[0] // 4, hero.hole_cards[1] // 4
+        s0, s1 = hero.hole_cards[0] % 4,  hero.hole_cards[1] % 4
+        high_rank = max(r0, r1)
+        low_rank  = min(r0, r1)
+        obs[6] = high_rank / 12.0
+        obs[7] = low_rank  / 12.0
+        obs[8] = 1.0 if (s0 == s1 and r0 != r1) else 0.0  # suited (not for pairs)
+        obs[9] = 1.0 if r0 == r1 else 0.0                  # pocket pair
 
-    # Community cards (one-hot)
+    # Community cards (one-hot, 52 dims at [10:62])
     for card in state.community_cards:
-        obs[58 + card] = 1.0
+        obs[10 + card] = 1.0
 
     # Opponents (in seat order, skipping hero)
     opp_idx = 0
     for p in state.players:
         if p.seat == hero_seat:
             continue
-        obs[110 + opp_idx] = p.stack / NORM
-        obs[116 + opp_idx] = p.bet_street / NORM
-        obs[122 + opp_idx] = float(p.is_folded)
-        obs[128 + opp_idx] = float(p.is_all_in)
+        obs[62 + opp_idx] = p.stack / NORM
+        obs[68 + opp_idx] = p.bet_street / NORM
+        obs[74 + opp_idx] = float(p.is_folded)
+        obs[80 + opp_idx] = float(p.is_all_in)
         opp_idx += 1
         if opp_idx >= 6:
             break
@@ -80,7 +101,7 @@ def build_observation(state: GameState, hero_seat: int) -> np.ndarray:
     return obs
 
 
-OBS_DIM = 134
+OBS_DIM = 86
 
 
 # ---------------------------------------------------------------------------
