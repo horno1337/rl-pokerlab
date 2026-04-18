@@ -151,48 +151,50 @@ NORM = BB_AMOUNT * 100   # 1000
 
 def build_rfi_obs(card1: int, card2: int, pos_rel: int) -> np.ndarray:
     """
-    Build a flat 134-dim observation for a preflop raise-first-in scenario.
+    Build a flat 86-dim observation for a preflop raise-first-in scenario.
 
     pos_rel: hero's seat position relative to the button (BTN=0 … BB=2 … CO=5).
     All players who act before the hero in preflop order are marked as folded.
     The blinds are posted; no voluntary action has happened yet.
+
+    Layout: [0:6] scalars | [6:10] compact hand | [10:62] community (preflop=zeros)
+            [62:68] opp stacks | [68:74] opp bets | [74:80] folded | [80:86] all-in
     """
     n_players = 6
-    button_seat = 0
-    hero_seat = pos_rel   # hero sits at seat == pos_rel (button_seat fixed at 0)
+    hero_seat = pos_rel
 
-    obs = np.zeros(134, dtype=np.float32)
+    obs = np.zeros(86, dtype=np.float32)
 
     # ── Scalar game features ──────────────────────────────────────────────
-    obs[0] = 0.0                         # street = PREFLOP (0/3)
-    obs[1] = (SB_AMOUNT + BB_AMOUNT) / NORM   # pot = SB + BB
-    obs[2] = BB_AMOUNT / NORM            # current_bet = BB
+    obs[0] = 0.0                                    # street = PREFLOP
+    obs[1] = (SB_AMOUNT + BB_AMOUNT) / NORM         # pot = SB + BB
+    obs[2] = BB_AMOUNT / NORM                       # current_bet = BB
 
-    # Hero chip state
-    if pos_rel == 1:   # SB: has posted blind
+    if pos_rel == 1:   # SB
         hero_stack      = STARTING_STACK - SB_AMOUNT
         hero_bet_street = SB_AMOUNT
-    elif pos_rel == 2:  # BB: has posted blind
+    elif pos_rel == 2:  # BB
         hero_stack      = STARTING_STACK - BB_AMOUNT
         hero_bet_street = BB_AMOUNT
-    else:               # everyone else: hasn't put chips in yet
+    else:
         hero_stack      = STARTING_STACK
         hero_bet_street = 0
 
     obs[3] = hero_stack / NORM
     obs[4] = hero_bet_street / NORM
-
-    # Relative position (0 = button)
     obs[5] = pos_rel / (n_players - 1)
 
-    # ── Hero hole cards (one-hot at [6:58]) ──────────────────────────────
-    obs[6 + card1] = 1.0
-    obs[6 + card2] = 1.0
+    # ── Compact hand features [6:10] ─────────────────────────────────────
+    r0, r1 = card1 // 4, card2 // 4
+    s0, s1 = card1 % 4,  card2 % 4
+    obs[6] = max(r0, r1) / 12.0
+    obs[7] = min(r0, r1) / 12.0
+    obs[8] = 1.0 if (s0 == s1 and r0 != r1) else 0.0
+    obs[9] = 1.0 if r0 == r1 else 0.0
 
-    # Community cards stay zero (preflop)
+    # Community cards [10:62] stay zero (preflop)
 
-    # ── Opponents ([110:134]) ─────────────────────────────────────────────
-    # Which seats have folded (acted before hero in preflop order)?
+    # ── Opponents [62:86] ────────────────────────────────────────────────
     hero_order_idx = PREFLOP_ORDER.index(pos_rel)
     folded_seats   = set(PREFLOP_ORDER[:hero_order_idx])
 
@@ -201,22 +203,17 @@ def build_rfi_obs(card1: int, card2: int, pos_rel: int) -> np.ndarray:
         if seat == hero_seat:
             continue
 
-        if seat == 1:   # SB posted
-            opp_stack      = STARTING_STACK - SB_AMOUNT
-            opp_bet_street = SB_AMOUNT
-        elif seat == 2:  # BB posted
-            opp_stack      = STARTING_STACK - BB_AMOUNT
-            opp_bet_street = BB_AMOUNT
+        if seat == 1:
+            opp_stack, opp_bet_street = STARTING_STACK - SB_AMOUNT, SB_AMOUNT
+        elif seat == 2:
+            opp_stack, opp_bet_street = STARTING_STACK - BB_AMOUNT, BB_AMOUNT
         else:
-            opp_stack      = STARTING_STACK
-            opp_bet_street = 0
+            opp_stack, opp_bet_street = STARTING_STACK, 0
 
-        is_folded = (seat in folded_seats)
-
-        obs[110 + opp_idx] = opp_stack / NORM
-        obs[116 + opp_idx] = opp_bet_street / NORM
-        obs[122 + opp_idx] = float(is_folded)
-        obs[128 + opp_idx] = 0.0   # nobody is all-in preflop
+        obs[62 + opp_idx] = opp_stack / NORM
+        obs[68 + opp_idx] = opp_bet_street / NORM
+        obs[74 + opp_idx] = float(seat in folded_seats)
+        obs[80 + opp_idx] = 0.0   # nobody all-in preflop
         opp_idx += 1
 
     return obs
@@ -308,7 +305,7 @@ def print_results(hand_str: str, display_name: str,
 # ────────────────────────────────────────────────────────────────────────────
 def main():
     script_dir  = os.path.dirname(os.path.abspath(__file__))
-    default_mdl = os.path.join(script_dir, "models", "best_model.zip")
+    default_mdl = os.path.join(script_dir, "models", "ppo_poker_final.zip")
     model_path  = sys.argv[1] if len(sys.argv) > 1 else default_mdl
 
     print(f"\n{BOLD}RL Poker — Hand Probe{RESET}")
