@@ -444,11 +444,22 @@ class MultiAgentRunner:
             seed=seed,
         )
 
-    def run(self, n_hands: int = 1000, verbose: bool = False) -> "SessionResult":
+    def run(self, n_hands: int = 1000, verbose: bool = False,
+            fixed_stacks: bool = False) -> "SessionResult":
+        """
+        Run n_hands hands and return a SessionResult.
+
+        fixed_stacks=True resets every player to starting_stack before each hand,
+        eliminating stack-compounding variance from the BB/100 metric.  Use this
+        for evaluation; leave False during training-loop self-play.
+        """
         self.game.reset_session()
         hand_rewards: List[List[int]] = []
 
         for _ in range(n_hands):
+            if fixed_stacks:
+                for p in self.game.players:
+                    p.stack = self.game.starting_stack
             self.game.start_hand()
             for agent in self.agents:
                 agent.reset()

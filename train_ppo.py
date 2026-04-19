@@ -411,9 +411,15 @@ def train_mixed_league(
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate(model_path: str, n_hands: int = 2000):
+def evaluate(model_path: str, n_hands: int = 5000):
+    """
+    Evaluate model_path over fixed-stack matchups.
+
+    fixed_stacks=True resets every player to starting_stack before each hand,
+    removing stack-compounding variance so BB/100 reflects pure strategy quality.
+    """
     print(f"\n{'='*55}")
-    print(f"Evaluating {model_path} over {n_hands} hands")
+    print(f"Evaluating {model_path} over {n_hands} hands (fixed stacks)")
     print("="*55)
 
     for label, opponents in [
@@ -428,7 +434,7 @@ def evaluate(model_path: str, n_hands: int = 2000):
     ]:
         agents = [PPOAgent(seat=0, model_path=model_path)] + opponents
         runner = MultiAgentRunner(agents, seed=0)
-        result = runner.run(n_hands=n_hands)
+        result = runner.run(n_hands=n_hands, fixed_stacks=True)
         ppo_bb100 = result.bb_per_100()[0]
         print(f"\n{label}")
         print(result.summary())
