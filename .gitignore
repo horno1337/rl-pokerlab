@@ -24,6 +24,9 @@ notebooks/.ipynb_checkpoints/
 *.ipynb_checkpoints/
 notebooks/fix_btn_rfi.py
 
+# One-off analysis script that hardcodes experiment results; PNGs are committed
+analysis/generate_report.py
+
 # IDEs
 .vscode/
 .idea/

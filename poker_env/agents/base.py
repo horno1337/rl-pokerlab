@@ -11,6 +11,7 @@ from typing import List, Dict, Any
 import numpy as np
 
 from poker_env.game import GameState, Action, ActionType, Street
+from poker_env.hand_eval import best_hand
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +20,69 @@ from poker_env.game import GameState, Action, ActionType, Street
 
 N_PLAYERS = 6
 N_CARD_FEATURES = 52   # one-hot card encoding
+
+
+def _postflop_features(hole_cards: list, community_cards: list) -> np.ndarray:
+    """
+    Compute 6 postflop features appended after the base 86-dim obs.
+
+      [0] made_hand_rank        — best_hand score / 8  (0=high card … 1=SF)
+      [1] flush_draw            — 1 if hero has exactly 4-to-flush (not yet made)
+      [2] straight_draw_outs    — distinct ranks completing a straight / 8, capped 1
+      [3] board_paired          — 1 if any board rank appears twice
+      [4] board_flush_possible  — 1 if 3+ same suit on board
+      [5] board_straight_possible — 1 if 3 board cards fit in a 5-rank window
+
+    All zeros preflop (no community cards).
+    """
+    out = np.zeros(6, dtype=np.float32)
+    if not community_cards or len(hole_cards) != 2:
+        return out
+
+    # 1. Made hand strength
+    score, _ = best_hand(hole_cards + community_cards)
+    out[0] = score / 8.0
+
+    # 2. Flush draw: exactly 4 cards of hero's suit (hero holds ≥1 of that suit)
+    hero_suits  = [c % 4 for c in hole_cards]
+    all_suits   = [c % 4 for c in hole_cards + community_cards]
+    for suit in range(4):
+        if hero_suits.count(suit) >= 1 and all_suits.count(suit) == 4:
+            out[1] = 1.0
+            break
+
+    # 3. Straight draw outs: ranks not yet held that complete a straight with ≥1 hero card
+    hero_ranks = set(c // 4 for c in hole_cards)
+    all_ranks  = set(c // 4 for c in hole_cards + community_cards)
+    outs = 0
+    for r in range(13):
+        if r in all_ranks:
+            continue
+        test = all_ranks | {r}
+        for lo in range(9):          # windows 0-4 … 8-12
+            window = set(range(lo, lo + 5))
+            if window <= test and (hero_ranks & window):
+                outs += 1
+                break
+    out[2] = min(outs / 8.0, 1.0)   # 8 outs (OESD) → 1.0
+
+    # 4. Board paired
+    board_ranks = [c // 4 for c in community_cards]
+    out[3] = 1.0 if len(set(board_ranks)) < len(board_ranks) else 0.0
+
+    # 5. Board flush possible (3+ of same suit on board)
+    board_suits = [c % 4 for c in community_cards]
+    if any(board_suits.count(s) >= 3 for s in range(4)):
+        out[4] = 1.0
+
+    # 6. Board straight possible (3 board cards within any 5-rank window)
+    board_rank_set = set(c // 4 for c in community_cards)
+    for lo in range(9):
+        if len(set(range(lo, lo + 5)) & board_rank_set) >= 3:
+            out[5] = 1.0
+            break
+
+    return out
 
 
 def build_observation(state: GameState, hero_seat: int) -> np.ndarray:
@@ -42,6 +106,10 @@ def build_observation(state: GameState, hero_seat: int) -> np.ndarray:
       [74:80] opponent is_folded flags
       [80:86] opponent is_all_in flags
     Total: 86 dims
+
+    A _postflop_features() helper is provided for future experiments that
+    want to extend the observation with explicit hand-strength features.
+    The shipping model (ppo_poker_final) was trained with 86-dim obs.
 
     Hole cards are represented ONLY as compact features [6:9].
     Previous versions included a 52-dim one-hot for hole cards, but a shallow

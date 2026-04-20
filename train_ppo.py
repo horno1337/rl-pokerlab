@@ -73,7 +73,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 
 from poker_env.env import PokerEnv, MultiAgentRunner
-from poker_env.agents.baselines import RandomAgent, HeuristicAgent, CallAgent, ThreeBetAgent
+from poker_env.agents.baselines import RandomAgent, HeuristicAgent, CallAgent, ThreeBetAgent, FoldToRaiseAgent
 from poker_env.agents.ppo_agent import PPOAgent
 from poker_env.agents.selfplay import ModelPool, SelfPlayAgent
 
@@ -117,6 +117,72 @@ def make_threebet_env(seed: int | None = None) -> PokerEnv:
         HeuristicAgent(seat=2, aggression=0.7, seed=None if seed is None else seed + 2),
         ThreeBetAgent(seat=3, bluff_freq=0.4, seed=None if seed is None else seed + 3),
         ThreeBetAgent(seat=4, bluff_freq=0.6, seed=None if seed is None else seed + 4),
+        ThreeBetAgent(seat=5, bluff_freq=0.5, seed=None if seed is None else seed + 5),
+    ]
+    return _make_poker_env(opponents, seed)
+
+
+def make_diverse_env(seed: int | None = None) -> PokerEnv:
+    """
+    Hero vs 1 Call + 1 Heuristic + 2 FoldToRaise + 1 ThreeBet.
+
+    Designed as the single starting environment for fresh training (no
+    multi-phase curriculum needed):
+      CallAgent         — eliminates bluff-fold-equity; forces hand selection
+      HeuristicAgent    — realistic bet/call/fold patterns
+      FoldToRaiseAgent  × 2 — bet medium hands, fold to raises; teaches hero
+                              that calling with a draw and betting on completion
+                              is more profitable than raising the draw away
+      ThreeBetAgent     — 3-bet pressure; prevents wide BTN open-range leak
+
+    Higher ent_coef (0.05 vs 0.01) in _build_model ensures enough exploration
+    for the model to discover that calling is sometimes the right action.
+    """
+    opponents = [
+        CallAgent(seat=1),
+        HeuristicAgent(seat=2, aggression=0.6, seed=None if seed is None else seed + 2),
+        FoldToRaiseAgent(seat=3, aggression=0.5, seed=None if seed is None else seed + 3),
+        FoldToRaiseAgent(seat=4, aggression=0.7, seed=None if seed is None else seed + 4),
+        ThreeBetAgent(seat=5, bluff_freq=0.4,  seed=None if seed is None else seed + 5),
+    ]
+    return _make_poker_env(opponents, seed)
+
+
+def make_fold_to_raise_env(seed: int | None = None) -> PokerEnv:
+    """
+    Hero vs 1 CallAgent + 2 HeuristicAgents + 2 FoldToRaiseAgents.
+
+    FoldToRaiseAgents bet medium hands but fold them to any raise, creating
+    spots where CALLING a bet with a draw is the profitable line (not raising).
+    CallAgent and HeuristicAgents are kept to preserve hand-strength and
+    fold-equity learning from Phase 1.
+    """
+    opponents = [
+        CallAgent(seat=1),
+        HeuristicAgent(seat=2, aggression=0.4, seed=None if seed is None else seed + 2),
+        HeuristicAgent(seat=3, aggression=0.7, seed=None if seed is None else seed + 3),
+        FoldToRaiseAgent(seat=4, aggression=0.5, seed=None if seed is None else seed + 4),
+        FoldToRaiseAgent(seat=5, aggression=0.7, seed=None if seed is None else seed + 5),
+    ]
+    return _make_poker_env(opponents, seed)
+
+
+def make_frozen_ppo_env(frozen_path: str, seed: int | None = None) -> PokerEnv:
+    """
+    Hero vs 3 frozen PPO copies + 2 ThreeBetAgents.
+
+    Frozen copies stay fixed for the entire training run (no pool feedback
+    loop), so there is no collapse risk.  The hero learns to beat the current
+    best model while facing consistent 3-bet pressure.
+
+    deterministic=False on PPOAgents → stochastic mixed-strategy play so
+    the hero can't pattern-match a single deterministic line.
+    """
+    opponents = [
+        PPOAgent(seat=1, model_path=frozen_path, deterministic=False),
+        PPOAgent(seat=2, model_path=frozen_path, deterministic=False),
+        PPOAgent(seat=3, model_path=frozen_path, deterministic=False),
+        ThreeBetAgent(seat=4, bluff_freq=0.3, seed=None if seed is None else seed + 4),
         ThreeBetAgent(seat=5, bluff_freq=0.5, seed=None if seed is None else seed + 5),
     ]
     return _make_poker_env(opponents, seed)
@@ -407,6 +473,73 @@ def train_mixed_league(
     return model
 
 
+def train_diverse(total_timesteps: int, n_envs: int = 4,
+                  base_model: str | None = None) -> PPO:
+    """
+    Single-phase training on the diverse environment.
+
+    Replaces the old heuristic → threebet → league pipeline with one run
+    against a carefully balanced opponent mix. Requires a fresh pretrained
+    base model (OBS_DIM=92).
+    """
+    env = make_vec_env(lambda: make_diverse_env(), n_envs=n_envs)
+    model = _build_model(env, base_model)
+    callbacks = _make_callbacks(n_envs, "models/ppo_diverse_final",
+                                make_diverse_env(seed=42))
+    print(f"[diverse] Training for {total_timesteps:,} steps...")
+    model.learn(total_timesteps=total_timesteps, callback=callbacks)
+    model.save("models/ppo_diverse_final")
+    print("Saved: models/ppo_diverse_final.zip")
+    return model
+
+
+def train_fold_to_raise(total_timesteps: int, n_envs: int = 4,
+                        base_model: str | None = None) -> PPO:
+    """
+    Fine-tune against FoldToRaiseAgents to teach postflop calldown strategy.
+
+    FoldToRaiseAgents bet medium hands but fold to raises, making CALLING a
+    bet with a draw the profitable play.  Starts from base_model to preserve
+    the preflop and hand-strength learning from Phase 1.
+    """
+    env = make_vec_env(lambda: make_fold_to_raise_env(), n_envs=n_envs)
+    model = _build_model(env, base_model)
+    callbacks = _make_callbacks(n_envs, "models/ppo_fold_to_raise_final",
+                                make_fold_to_raise_env(seed=42))
+    print(f"[fold_to_raise] Training for {total_timesteps:,} steps...")
+    model.learn(total_timesteps=total_timesteps, callback=callbacks)
+    model.save("models/ppo_fold_to_raise_final")
+    print("Saved: models/ppo_fold_to_raise_final.zip")
+    return model
+
+
+def train_frozen_ppo(total_timesteps: int, n_envs: int = 4,
+                     base_model: str | None = None) -> PPO:
+    """
+    Fine-tune against frozen copies of the base model + 2 ThreeBetAgents.
+
+    Unlike self-play, opponents never update — the hero learns to beat a
+    specific, realistic strategy rather than a moving target.  This avoids
+    the two failure modes seen previously:
+      - pure heuristic: opponents too weak, no 3-bet pressure
+      - self-play / mixed_league: pool fills with weak copies → maniac spiral
+    """
+    frozen_path = base_model or "models/ppo_poker_final"
+    if not os.path.exists(frozen_path + ".zip"):
+        raise ValueError(f"Frozen model not found: {frozen_path}.zip — pass --base-model")
+
+    env = make_vec_env(lambda: make_frozen_ppo_env(frozen_path), n_envs=n_envs)
+    model = _build_model(env, base_model)
+    callbacks = _make_callbacks(n_envs, "models/ppo_frozen_final",
+                                make_frozen_ppo_env(frozen_path, seed=42))
+    print(f"[frozen_ppo] Training for {total_timesteps:,} steps")
+    print(f"[frozen_ppo] Frozen opponents: {frozen_path}")
+    model.learn(total_timesteps=total_timesteps, callback=callbacks)
+    model.save("models/ppo_frozen_final")
+    print("Saved: models/ppo_frozen_final.zip")
+    return model
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -447,7 +580,7 @@ def evaluate(model_path: str, n_hands: int = 5000):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode",        choices=["heuristic", "threebet", "selfplay", "league", "mixed_league"],
+    parser.add_argument("--mode",        choices=["heuristic", "threebet", "selfplay", "league", "mixed_league", "frozen_ppo", "fold_to_raise", "diverse"],
                         default="heuristic")
     parser.add_argument("--timesteps",   type=int, default=500_000,
                         help="Total steps (heuristic/threebet/selfplay) or steps-per-gen (league)")
@@ -467,6 +600,9 @@ if __name__ == "__main__":
         "selfplay":     "models/ppo_selfplay_final",
         "league":       "models/ppo_league_final",
         "mixed_league": "models/ppo_mixed_league_final",
+        "frozen_ppo":       "models/ppo_frozen_final",
+        "fold_to_raise":    "models/ppo_fold_to_raise_final",
+        "diverse":          "models/ppo_diverse_final",
     }
     eval_model = args.model or output_models[args.mode]
 
@@ -481,6 +617,12 @@ if __name__ == "__main__":
             train_league(args.generations, args.timesteps, args.n_envs, args.base_model)
         elif args.mode == "mixed_league":
             train_mixed_league(args.generations, args.timesteps, args.n_envs, args.base_model)
+        elif args.mode == "frozen_ppo":
+            train_frozen_ppo(args.timesteps, args.n_envs, args.base_model)
+        elif args.mode == "fold_to_raise":
+            train_fold_to_raise(args.timesteps, args.n_envs, args.base_model)
+        elif args.mode == "diverse":
+            train_diverse(args.timesteps, args.n_envs, args.base_model)
 
     if os.path.exists(eval_model + ".zip") or os.path.exists(eval_model):
         evaluate(model_path=eval_model)

@@ -223,6 +223,123 @@ class ThreeBetAgent(BaseAgent):
         return score
 
 
+class FoldToRaiseAgent(BaseAgent):
+    """
+    Bets medium hands but folds them to any raise this street.
+
+    Creates a training signal that teaches the hero to CALL postflop bets
+    with draws instead of always raising or folding.  Against CallAgents,
+    raising any two cards is always "wrong" because they never fold, so
+    the model learns raise-or-fold.  This opponent teaches the third option:
+    call a bet, realize draw equity, then bet/raise on later streets when hit.
+
+    Preflop : value-raise strong (TT+, AK, AQs+), call medium, fold trash.
+    Postflop:
+      Strong  (strength >= 5) — bet / call / raise normally
+      Medium  (strength 2-4)  — bet when checked to; call first bet ≤40% pot;
+                                 FOLD to any raise this street
+      Weak    (strength < 2)  — check / fold
+    """
+
+    def __init__(self, seat: int, aggression: float = 0.5, seed: int | None = None):
+        super().__init__(seat)
+        self.aggression = aggression
+        self.rng = random.Random(seed)
+
+    def act(self, state: GameState) -> Action:
+        hero = state.players[self.seat]
+        call_amount  = state.current_bet - hero.bet_street
+        all_in_to    = hero.bet_street + hero.stack
+        pot_raise_to = state.current_bet + state.pot
+        half_pot_bet = state.current_bet + max(state.pot // 2, state.bb_amount)
+
+        if state.street == Street.PREFLOP:
+            return self._preflop(state, hero, call_amount, all_in_to)
+        return self._postflop(state, hero, call_amount, all_in_to,
+                              pot_raise_to, half_pot_bet)
+
+    # ------------------------------------------------------------------
+
+    def _preflop(self, state, hero, call_amount, all_in_to):
+        val = self._preflop_value(hero.hole_cards)
+        three_bet_to = min(state.current_bet * 3, all_in_to)
+        open_to      = min(state.bb_amount * 3,   all_in_to)
+
+        if val >= 9.0:            # TT+, AK, AQs — value raise
+            if call_amount > 0:
+                return Action(ActionType.RAISE, amount=three_bet_to)
+            return Action(ActionType.RAISE, amount=open_to)
+        if val >= 5.0:            # medium: call or open-limp
+            if call_amount == 0:
+                return Action(ActionType.CHECK)
+            if call_amount < hero.stack:
+                return Action(ActionType.CALL)
+        if call_amount == 0:
+            return Action(ActionType.CHECK)
+        return Action(ActionType.FOLD)
+
+    def _postflop(self, state, hero, call_amount, all_in_to,
+                  pot_raise_to, half_pot_bet):
+        strength = self._postflop_strength(hero.hole_cards, state.community_cards)
+
+        # Was there already a raise this street (from any player)?
+        raised = any(a.action_type in (ActionType.RAISE, ActionType.ALL_IN)
+                     for _, a in state.action_history)
+
+        # ── Strong hand ──────────────────────────────────────────────────
+        if strength >= 5:
+            if call_amount > 0:
+                if self.rng.random() < self.aggression and all_in_to > state.current_bet:
+                    return Action(ActionType.RAISE, amount=min(pot_raise_to, all_in_to))
+                return (Action(ActionType.CALL) if call_amount < hero.stack
+                        else Action(ActionType.ALL_IN, amount=all_in_to))
+            if self.rng.random() < self.aggression and all_in_to > state.current_bet:
+                return Action(ActionType.RAISE, amount=min(half_pot_bet, all_in_to))
+            return Action(ActionType.CHECK)
+
+        # ── Medium hand — fold to raises ─────────────────────────────────
+        if strength >= 2:
+            if raised:
+                return Action(ActionType.FOLD)
+            if call_amount > 0:
+                if call_amount <= state.pot * 0.4:
+                    return Action(ActionType.CALL)
+                return Action(ActionType.FOLD)
+            if self.rng.random() < self.aggression * 0.6 and all_in_to > state.current_bet:
+                return Action(ActionType.RAISE, amount=min(half_pot_bet, all_in_to))
+            return Action(ActionType.CHECK)
+
+        # ── Weak hand ────────────────────────────────────────────────────
+        if call_amount == 0:
+            return Action(ActionType.CHECK)
+        return Action(ActionType.FOLD)
+
+    # ------------------------------------------------------------------
+
+    def _preflop_value(self, hole_cards: list) -> float:
+        ranks = sorted([c // 4 for c in hole_cards], reverse=True)
+        high, low = ranks
+        suited = (hole_cards[0] % 4 == hole_cards[1] % 4)
+        if high == low:
+            return float(high)
+        base = (high + low) / 2.0
+        if suited:
+            base += 1.5
+        if high - low == 1:
+            base += 0.5
+        return base
+
+    def _postflop_strength(self, hole: list, community: list) -> int:
+        if not community:
+            ranks = sorted([c // 4 for c in hole], reverse=True)
+            strength = ranks[0] / 2
+            if ranks[0] == ranks[1]:
+                strength += 3
+            return int(strength)
+        score, _ = best_hand(hole + community)
+        return score
+
+
 class HumanAgent(BaseAgent):
     """Reads action from stdin. For manual play and debugging."""
 
