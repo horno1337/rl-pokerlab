@@ -236,48 +236,6 @@ class PokerGame:
     # Hand lifecycle
     # ------------------------------------------------------------------
 
-    def start_hand(self):
-        assert self.hand_done, "Previous hand not finished"
-        self.hand_number += 1
-        self.hand_done = False
-
-        # Reset player hand state
-        for p in self.players:
-            p.reset_for_hand()
-
-        # Advance button
-        self.button_seat = self._next_active_seat(self.button_seat)
-        sb_seat = self._next_active_seat(self.button_seat)
-        bb_seat = self._next_active_seat(sb_seat)
-        self._sb_seat = sb_seat
-        self._bb_seat = bb_seat
-
-        # Reset street state
-        self._street = Street.PREFLOP
-        self._community = []
-        self._pot = 0
-        self._current_bet = 0
-        self._min_raise = self.bb_amount
-        self._last_aggressor = None
-        self._action_history = []
-
-        # Deal hole cards
-        self.deck.shuffle(self.rng)
-        for p in self.players:
-            if not p.is_sitting_out:
-                p.hole_cards = self.deck.deal(2)
-
-        # Post blinds
-        self._post_blind(sb_seat, self.sb_amount)
-        self._post_blind(bb_seat, self.bb_amount)
-        self._current_bet = self.bb_amount
-        self._min_raise = self.bb_amount
-
-        # Action starts left of BB preflop
-        self._acting_seat = self._next_active_seat(bb_seat)
-        self._last_aggressor = bb_seat  # BB is treated as last aggressor preflop
-        self._street_action_count = 0
-
     def _post_blind(self, seat: int, amount: int):
         p = self.players[seat]
         actual = p.put_in(amount)
